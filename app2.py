@@ -1,0 +1,107 @@
+import streamlit as st
+from pyneuphonic import Neuphonic, TTSConfig, save_audio
+from pyneuphonic.models import APIResponse, AgentResponse, AgentConfig, WebsocketEvents
+from pyneuphonic.player import AsyncAudioPlayer, AsyncAudioRecorder
+import os
+import asyncio
+import logging
+
+# Ignore logging errors from WebSocket connections
+class IgnoreOKErrors(logging.Filter):
+    def filter(self, record):
+        return "sent 1000 (OK)" not in record.getMessage()
+
+logging.getLogger('root').addFilter(IgnoreOKErrors())
+
+# Neuphonic API Key
+api_key = "1701b983c6aa9def986084fad58939215af401e941c4fe219cf2e35780d805ed.c9441799-387a-4c62-979d-166ee460a801"
+
+# Save transcripts to text files
+def save_transcript(text, section):
+    try:
+        with open(f'transcripts/{section}.txt', 'a') as f:
+            f.write(f'{text}\n')
+    except FileNotFoundError:
+        os.makedirs('transcripts', exist_ok=True)
+        with open(f'transcripts/{section}.txt', 'a') as f:
+            f.write(f'{text}\n')
+
+# Default handler for agent messages
+def default_on_message(message: APIResponse[AgentResponse]):
+    if message.data.type == 'user_transcript':
+        st.write(f"User: {message.data.text}")
+        save_transcript(message.data.text, 'transcript')
+    elif message.data.type == 'llm_response':
+        st.write(f"Agent: {message.data.text}")
+
+# Define the Agent class for Streamlit
+class StreamlitAgent:
+    def __init__(self, client: Neuphonic, agent_id, mute=False, on_message=default_on_message):
+        self.config = AgentConfig(agent_id=agent_id, mode='asr')  # Configure ASR mode
+        self.mute = mute
+        self.client = client
+        self.ws = client.agents.AsyncWebsocketClient()
+        self.player = AsyncAudioPlayer() if not self.mute else None
+        self.recorder = AsyncAudioRecorder(websocket=self.ws, player=self.player)
+        self.on_message_hook = on_message
+
+    async def on_message(self, message: APIResponse[AgentResponse]):
+        if message.data.type == 'audio_response' and not self.mute:
+            await self.player.play(message.data.audio)
+        if self.on_message_hook:
+            self.on_message_hook(message)
+
+    async def start(self):
+        self.ws.on(WebsocketEvents.MESSAGE, self.on_message)
+        self.ws.on(WebsocketEvents.CLOSE, self.on_close)
+        if not self.mute:
+            await self.player.open()
+        await self.ws.open(self.config)
+        await self.recorder.record()
+
+    async def on_close(self):
+        if not self.mute:
+            await self.player.close()
+        await self.recorder.close()
+
+# Streamlit App Interface
+st.title("AI Assistant Andrea")
+st.write("Use this app to interact with Andrea, an AI assistant for recording ideas.")
+
+# Section for agent configuration
+st.header("Agent Configuration")
+prompt = st.text_area("Agent Prompt", 
+    "You are a helpful agent. Your name is Andrea. I will give you an idea to record. "
+    "You have to listen to the full idea that I am telling you. If I say thank you that is all or quick note, "
+    "you must say thank you recorded. If I say Hey Andrea, you need to say, what is your idea? "
+    "After I tell you the idea, you must say thank you, recorded."
+)
+greeting = st.text_input("Agent Greeting", value="How can I help you?")
+
+# Create and start the agent
+if st.button("Create Agent"):
+    client = Neuphonic(api_key=api_key)
+    response = client.agents.create(name="Andrea", prompt=prompt, greeting=greeting)
+    agent_id = response.data['id']
+    st.session_state.agent_id = agent_id
+    st.success(f"Agent created with ID: {agent_id}")
+
+if "agent_id" in st.session_state:
+    agent_id = st.session_state.agent_id
+    agent = StreamlitAgent(client=Neuphonic(api_key=api_key), agent_id=agent_id)
+
+    if st.button("Start Agent"):
+        async def start_agent():
+            await agent.start()
+        asyncio.run(start_agent())
+        st.success("Agent started. You can now interact with it.")
+
+# Show transcripts
+st.header("Saved Transcripts")
+if os.path.exists("transcripts"):
+    for file in os.listdir("transcripts"):
+        with open(f"transcripts/{file}", "r") as f:
+            st.subheader(file.replace(".txt", "").capitalize())
+            st.text(f.read())
+else:
+    st.write("No transcripts available.")
