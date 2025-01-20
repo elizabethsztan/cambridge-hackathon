@@ -1,70 +1,103 @@
 import streamlit as st
-from pyneuphonic import Neuphonic, TTSConfig, save_audio, Agent
-from pyneuphonic.player import AudioPlayer
 import asyncio
+import os
+from pyneuphonic import Neuphonic, TTSConfig, save_audio
+from pyneuphonic.models import AgentConfig, APIResponse, AgentResponse, WebsocketEvents
+from pyneuphonic.player import AsyncAudioPlayer, AsyncAudioRecorder
 
 # PLACE YOUR API KEY HERE
-api_key = "3348afafcb8324881d514535507797386e605fa07548e2f9a0aad1f67b802bf5.8c49e6f4-15e8-4c64-b84b-a1e13151ddc8"
+api_key = "1701b983c6aa9def986084fad58939215af401e941c4fe219cf2e35780d805ed.c9441799-387a-4c62-979d-166ee460a801"
 
-# Initialising Neuphonic client
+# Initialize Neuphonic Client
 client = Neuphonic(api_key=api_key)
 
-# Streamlit App UI
-st.title("AI Audio Interpreter")
+# Function to save transcripts
+def save_transcript(text, section):
+    try:
+        with open(f'transcripts/{section}.txt', 'a') as f:
+            f.write(f'{text}\n')
+    except FileNotFoundError:
+        os.makedirs('transcripts', exist_ok=True)
+        with open(f'transcripts/{section}.txt', 'a') as f:
+            f.write(f'{text}\n')
 
-# Section to list available voices
-if st.button("List Available Voices"):
-    response = client.voices.list()
-    voices = response.data['voices']
-    st.write("Available Voices:")
-    for voice in voices:
-        st.write(f"Name: {voice['name']}, ID: {voice['id']}")
+# Default on-message handler
+def default_on_message(message: APIResponse[AgentResponse]):
+    if message.data.type == 'user_transcript':
+        st.write(f"User: {message.data.text}")
+        if 'work items' in message.data.text.lower():
+            save_transcript(message.data.text, 'work_items')
+        elif 'cooking' in message.data.text.lower():
+            save_transcript(message.data.text, 'cooking')
+        else:
+            save_transcript(message.data.text, 'quick_note')
+    elif message.data.type == 'llm_response':
+        st.write(f"Agent: {message.data.text}")
 
-# Text-to-Speech Section
-st.header("Text-to-Speech (TTS)")
-input_text = st.text_input("Enter text to convert to speech:", "Hello, world!")
-selected_voice = st.text_input("Enter Voice ID (optional):", "")
-speed = st.slider("Select Speed (1.0 = normal):", 0.5, 2.0, 1.0)
+# Define the Agent Class
+class StreamlitAgent:
+    def __init__(self, client: Neuphonic, agent_id, mute=False, on_message=default_on_message):
+        self.config = AgentConfig(agent_id=agent_id, mode='asr')  # Configure ASR mode
+        self.mute = mute
+        self.client = client
+        self.ws = client.agents.AsyncWebsocketClient()
+        self.player = AsyncAudioPlayer() if not self.mute else None
+        self.recorder = AsyncAudioRecorder(websocket=self.ws, player=self.player)
+        self.on_message_hook = on_message
 
-if st.button("Generate Audio"):
-    tts_config = TTSConfig(
-        model='neu_hq',  # Change model if needed
-        speed=speed,
-        voice=selected_voice if selected_voice else None  # Use provided voice ID or default
-    )
+    async def on_message(self, message: APIResponse[AgentResponse]):
+        if message.data.type == 'audio_response' and not self.mute:
+            await self.player.play(message.data.audio)
+        if self.on_message_hook:
+            self.on_message_hook(message)
 
-    # Generate audio
-    sse = client.tts.SSEClient()
-    response = sse.send(input_text, tts_config=tts_config)
-    audio_bytes = bytearray()
-    for item in response:
-        audio_bytes += item.data.audio
+    async def start(self):
+        self.ws.on(WebsocketEvents.MESSAGE, self.on_message)
+        self.ws.on(WebsocketEvents.CLOSE, self.on_close)
+        if not self.mute:
+            await self.player.open()
+        await self.ws.open(self.config)
+        await self.recorder.record()
 
-    # Save audio and display
-    save_audio(audio_bytes=audio_bytes, file_path="output.wav")
-    st.audio("output.wav", format="audio/wav")
-    st.success("Audio generated and saved as 'output.wav'.")
+    async def on_close(self):
+        if not self.mute:
+            await self.player.close()
+        await self.recorder.close()
 
-# AI Agent Section
-st.header("AI Agent Interaction")
-prompt = st.text_area("Enter Agent Prompt:", "You are a helpful agent. Answer in 10 words or less.")
-greeting = st.text_input("Enter Agent Greeting:", "Hi, how can I help you today?")
+# Streamlit Interface
+st.title("AI Audio Recording Assistant")
+st.write("Use this app to interact with the Neuphonic AI Agent for recording ideas.")
 
-if st.button("Create AI Agent"):
-    agent_id = client.agents.create(
-        name="Streamlit Agent",
-        prompt=prompt,
-        greeting=greeting
-    ).data['id']
+# Section to configure the agent
+st.header("Agent Configuration")
+prompt = st.text_area("Agent Prompt", value="You are a helpful agent. Listen to my idea until I say 'that is all', then say 'thank you, recorded.'")
+greeting = st.text_input("Agent Greeting", value="I am ready to record your ideas.")
 
-    agent = Agent(client, agent_id=agent_id, tts_model='neu_hq')
+if st.button("Create Agent"):
+    response = client.agents.create(name="Streamlit Agent", prompt=prompt, greeting=greeting)
+    agent_id = response.data['id']
     st.success(f"Agent created with ID: {agent_id}")
-    st.write(f"Greeting: {greeting}")
 
-# Start the agent if already created
-if st.button("Start Agent"):
+    # Start the agent
+    agent = StreamlitAgent(client=client, agent_id=agent_id)
+    st.session_state.agent = agent
+else:
+    agent = st.session_state.get("agent", None)
+
+# Start the agent and record input
+if agent and st.button("Start Recording"):
     async def start_agent():
         await agent.start()
-
     asyncio.run(start_agent())
-    st.success("Agent started and listening for input.")
+    st.success("Agent started. You can now interact with it.")
+
+# Show saved transcripts
+st.header("Transcripts")
+if os.path.exists("transcripts"):
+    for file in os.listdir("transcripts"):
+        with open(f"transcripts/{file}", "r") as f:
+            st.subheader(file.replace(".txt", "").capitalize())
+            st.text(f.read())
+else:
+    st.write("No transcripts available.")
+
