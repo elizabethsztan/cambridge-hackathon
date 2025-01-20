@@ -1,0 +1,40 @@
+# Ignore Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore virtual environments
+dual_venv/
+dad_venv/
+hackthon0/
+dad_venv_2/
+venv/
+.env/
+
+# Ignore pytest cache
+.pytest_cache/
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Build directories and files
+*.egg-info/
+src/ *.egg-info/
+*.egg/
+build/
+dist/
+
+# Cython build artifacts
+*.so
+*.pyd
+*.c
+*.cpp
+
+# Python bytecode
+__pycache__/
+*.py[cod]
